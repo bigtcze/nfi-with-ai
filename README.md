@@ -1,53 +1,53 @@
 # NFI With AI
 
-AI veto vrstva nad `NostalgiaForInfinityX7` pro Freqtrade.
+An AI veto layer for `NostalgiaForInfinityX7` on Freqtrade.
 
-`NFIWithVeto` nechá NFI X7 dělat to, v čem je silná: hledání krátkodobých setupů na 5m. Před samotným vstupem ale pustí signál přes AI review, které se podívá na vyšší timeframe price action a zablokuje obchody, které vypadají jako budoucí `grind` / `rebuy` past.
+`NFIWithVeto` keeps NFI X7 responsible for what it already does well: finding short-term 5m setups. Right before a new entry is placed, the signal is reviewed by AI using higher-timeframe price action. The goal is to block the small number of entries that are likely to turn into costly `grind` / `rebuy` traps.
 
-AI neřeší sentiment, zprávy ani stock-picking styl rozhodování. Chová se jako trader s nadhledem nad chartem.
+This project does not try to outsmart NFI on every trade. It acts like a trader with broader chart awareness.
 
-## Co to dělá
+## What It Does
 
-- zachová kompletní původní logiku `NostalgiaForInfinityX7`
-- zapojí AI až po `super().confirm_trade_entry()`
-- AI dostane `1D`, `4H`, `1H` candles, BTC kontext, entry mode a DCA profil
-- AI vrací jen `accept` nebo `veto`
-- při výpadku AI běží režim `fail-open`, takže trade projde čistě přes NFI
+- preserves the full original `NostalgiaForInfinityX7` logic
+- calls AI only after `super().confirm_trade_entry()` passes
+- sends `1D`, `4H`, and `1H` candle context, BTC context, entry mode, and DCA profile to the reviewer
+- allows the reviewer to return only `accept` or `veto`
+- uses `fail-open`, so if AI is unavailable the trade proceeds through plain NFI
 
-## Co to nedělá
+## What It Does Not Do
 
-- nemění size pozice
-- nesahá do `adjust_trade_position()`
-- neřeší exity
-- nepoužívá websearch
-- nepoužívá fallback na jiný model
+- it does not resize positions
+- it does not touch `adjust_trade_position()`
+- it does not manage exits
+- it does not use web search
+- it does not fall back to another model
 
-## Soubory v repu
+## Repository Files
 
-- `NostalgiaForInfinityX7.py`: upstream strategie
-- `nfi_with_veto.py`: wrapper strategie `NFIWithVeto`
-- `llm_reviewer.py`: AI review vrstva přes cliproxy
-- `.github/workflows/sync-upstream.yml`: automatický sync nového upstream releasu
-- `agents.md`: interní technický overview
+- `NostalgiaForInfinityX7.py`: upstream strategy baseline
+- `nfi_with_veto.py`: wrapper strategy `NFIWithVeto`
+- `llm_reviewer.py`: AI review layer via cliproxy
+- `.github/workflows/sync-upstream.yml`: automatic upstream release sync
+- `agents.md`: technical project overview
 
-## Požadavky
+## Requirements
 
 1. Freqtrade
-2. běžící cliproxy na stroji, kde je dostupné z Freqtrade
-3. GPT model přes cliproxy
-4. doporučený první rollout v `dry_run`
+2. a running cliproxy instance reachable from Freqtrade
+3. a GPT model exposed through cliproxy
+4. first rollout in `dry_run`
 
-## Instalace
+## Installation
 
-### Varianta A: Freqtrade běží přímo na hostu
+### Option A: Freqtrade running directly on the host
 
-1. Naklonuj repo:
+1. Clone the repository:
 
 ```bash
 git clone https://github.com/bigtcze/nfi-with-ai.git
 ```
 
-2. Zkopíruj tyto soubory do `user_data/strategies`:
+2. Copy these files into `user_data/strategies`:
 
 ```bash
 cp nfi-with-ai/NostalgiaForInfinityX7.py /path/to/freqtrade/user_data/strategies/
@@ -55,7 +55,7 @@ cp nfi-with-ai/nfi_with_veto.py /path/to/freqtrade/user_data/strategies/
 cp nfi-with-ai/llm_reviewer.py /path/to/freqtrade/user_data/strategies/
 ```
 
-3. Nastav environment variables:
+3. Set environment variables:
 
 ```bash
 export LLM_BASE_URL=http://localhost:8317/v1
@@ -65,7 +65,7 @@ export LLM_TIMEOUT=8
 export LLM_COOLDOWN=60
 ```
 
-4. V `config.json` nastav strategii:
+4. Configure the strategy in `config.json`:
 
 ```json
 {
@@ -75,11 +75,11 @@ export LLM_COOLDOWN=60
 }
 ```
 
-### Varianta B: Freqtrade běží v Dockeru
+### Option B: Freqtrade running in Docker
 
-V Dockeru `localhost` znamená kontejner, ne host. Pokud cliproxy běží na hostu, musíš použít adresu hosta.
+Inside Docker, `localhost` means the container, not the host. If cliproxy runs on the host machine, use the host address instead.
 
-Nejčastější varianta je:
+Typical setup:
 
 ```yaml
 services:
@@ -100,7 +100,7 @@ services:
       - "host.docker.internal:host-gateway"
 ```
 
-V `config.json` pak:
+Then in `config.json`:
 
 ```json
 {
@@ -110,34 +110,34 @@ V `config.json` pak:
 }
 ```
 
-Pokud cliproxy běží ve stejném Docker networku jako Freqtrade, nastav místo `host.docker.internal` přímo název služby.
+If cliproxy runs in the same Docker network as Freqtrade, use the cliproxy service name instead of `host.docker.internal`.
 
-## Jak to použít
+## How To Use It
 
-1. spusť cliproxy
-2. ověř, že endpoint odpovídá na `http://localhost:8317/v1` nebo na adresu, kterou používá Freqtrade
-3. spusť Freqtrade s `dry_run = true`
-4. zkontroluj, že se načetla strategie `NFIWithVeto`
-5. sleduj logy a vetované obchody
+1. Start cliproxy.
+2. Verify the endpoint responds on `http://localhost:8317/v1` or whatever address Freqtrade will use.
+3. Run Freqtrade with `dry_run = true`.
+4. Confirm that the strategy `NFIWithVeto` is loaded.
+5. Watch the logs and the vetoed trades.
 
-## Doporučený rollout
+## Recommended Rollout
 
-1. nejdřív `dry_run`
-2. AI veto zapnuté naplno
-3. sledovat hlavně vetované obchody, obsazení slotů a obchody, které by jinak spadly do `grind/rebuy`
-4. až potom přepnout na live
+1. Start with `dry_run`.
+2. Keep AI veto fully enabled.
+3. Review vetoed trades, slot occupancy, and trades that would otherwise have fallen into `grind` / `rebuy` behavior.
+4. Move to live trading only after that looks sane.
 
-Smysl této vrstvy není zvýšit počet entry. Smysl je odstranit malý počet vstupů, které se později změní ve velké averaging-down pasti.
+The point of this layer is not to increase trade count. The point is to remove the small number of entries that later turn into large averaging-down traps.
 
 ## Logging
 
-Každé AI review se zapisuje do:
+Every AI review is written to:
 
 ```text
 user_data/logs/llm_reviews/reviews-YYYY-MM-DD.jsonl
 ```
 
-Log obsahuje například:
+Example:
 
 ```json
 {
@@ -156,19 +156,19 @@ Log obsahuje například:
 }
 ```
 
-Logy rotují denně a starší než 30 dní se automaticky mažou.
+Logs rotate daily and files older than 30 days are removed automatically.
 
-## Konfigurace AI
+## AI Configuration
 
-Použité proměnné:
+Environment variables used by the reviewer:
 
 - `LLM_BASE_URL`: cliproxy endpoint
-- `LLM_MODEL`: model dostupný přes cliproxy
-- `LLM_REASONING_EFFORT`: `low`, `medium`, `high` podle podpory cliproxy/modelu
-- `LLM_TIMEOUT`: timeout requestu v sekundách
-- `LLM_COOLDOWN`: cache pro stejné review v sekundách
+- `LLM_MODEL`: model exposed by cliproxy
+- `LLM_REASONING_EFFORT`: `low`, `medium`, `high` depending on cliproxy/model support
+- `LLM_TIMEOUT`: request timeout in seconds
+- `LLM_COOLDOWN`: cache duration for repeated reviews in seconds
 
-Defaulty v repu:
+Repository defaults:
 
 ```bash
 LLM_BASE_URL=http://localhost:8317/v1
@@ -178,15 +178,15 @@ LLM_TIMEOUT=8
 LLM_COOLDOWN=60
 ```
 
-## Upstream sync
+## Upstream Sync
 
-Workflow v `.github/workflows/sync-upstream.yml` kontroluje nový upstream release tag z `iterativv/NostalgiaForInfinity` a při nové verzi stáhne čerstvý `NostalgiaForInfinityX7.py`.
+The workflow in `.github/workflows/sync-upstream.yml` watches for a new upstream release tag from `iterativv/NostalgiaForInfinity` and updates `NostalgiaForInfinityX7.py` when a new release appears.
 
-Tvoje AI vrstva zůstává odděleně v `nfi_with_veto.py` a `llm_reviewer.py`.
+The AI layer stays separate in `nfi_with_veto.py` and `llm_reviewer.py`.
 
-## Důležité poznámky
+## Important Notes
 
-1. Repo počítá s tím, že AI vrstva je jen `entry veto` pro Fázi 1.
-2. Pokud cliproxy není dostupné, bot jede dál přes čisté NFI.
-3. Pokud jedeš Docker, zkontroluj adresu cliproxy. `localhost` uvnitř kontejneru téměř nikdy není to, co chceš.
-4. Před live nasazením vždy nejdřív `dry_run`.
+1. This repository currently implements only Phase 1: entry veto.
+2. If cliproxy is unavailable, the bot continues with plain NFI logic.
+3. If you run Docker, double-check the cliproxy address. `localhost` inside the container is almost never what you want.
+4. Always start with `dry_run` before going live.

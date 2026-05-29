@@ -1,66 +1,73 @@
 # NFI + AI Veto
 
-LLM reviewer vrstva nad NostalgiaForInfinityX7. NFI generuje buy signal na 5m svíčkách, AI se podívá na větší obrázek (1d, 4h, 1h price action) a buď ho pustí, nebo zablokuje.
+An LLM review layer on top of `NostalgiaForInfinityX7`. NFI generates a 5m entry signal, and AI looks at the broader picture using `1D`, `4H`, and `1H` price action before deciding whether to allow or block the trade.
 
-## Proč
+## Why
 
-NFI je dobrá v hledání krátkodobých setupů na 5m. Ale nemá úsudek — nevidí, že coin právě pumpnul 60 % a kupuje top, nebo že BTC padá a alt ho bude následovat, nebo že se coin 2 týdny sesypává a nic se nezměnilo. AI (GPT-5.4 mini přes cliproxy) se na data podívá jako zkušený trader — s nadhledem a úsudkem, ne s checklistem.
+NFI is very good at finding short-term setups on 5m, but it has no judgment. It cannot see that a coin just pumped 60% and is trying to buy the top, or that BTC is rolling over and the alt will likely follow, or that a coin has been bleeding for two weeks and nothing in the structure has improved. AI reviews the chart like an experienced trader, with context and judgment instead of a checklist.
 
-## Architektura
+## Architecture
 
-```
+```text
 NFI X7 buy signal (5m)
-  │
-  ▼
+  |
+  v
 confirm_trade_entry()
-  ├── super() — všechny originální NFI filtry (grind/scalp/top_coins mode, slippage, futures slots)
-  │   │
-  │   ├── NFI rejected → STOP (bez LLM volání)
-  │   └── NFI accepted ▼
-  │
-  ├── 1D candles (14) + RSI
-  ├── 4H candles (20) + RSI
-  ├── 1H candles (24) + RSI
-  ├── BTC 24h change + 7d trend
-  ├── Posledních 5 uzavřených tradů na páru
-  │
-  ▼
-GPT-5.4 mini (přes cliproxy)
-  │
-  ├── accept  → trade projde
-  └── veto    → trade zablokován
+  |- super() - all original NFI filters (grind/scalp/top_coins mode, slippage, futures slots)
+  |  |
+  |  |- NFI rejected -> STOP (no LLM call)
+  |  \- NFI accepted
+  |
+  |- 1D candles (14) + RSI/MFI
+  |- 4H candles (20) + RSI/MFI
+  |- 1H candles (24) + RSI/MFI
+  |- BTC 24h change + 7d trend
+  |- recent closed trades on the pair
+  |- entry mode + DCA profile
+  |- open slot usage
+  |
+  v
+GPT-5.4 mini via cliproxy
+  |
+  |- accept -> trade proceeds
+  \- veto   -> trade is blocked
 ```
 
-## Co AI dělá
+## What The AI Does
 
-Dostane OHLCV data ze tří timeframů. Přemýšlí nad nimi jako trader, který se na to dívá s vlastními penězi v sázce. Prompt mu nedává pravidla ani checklist — dává mu roli a zkušenost:
+The reviewer receives multi-timeframe OHLCV data and thinks like a trader looking at a chart with their own money on the line.
 
-> "You trade crypto for a living. You've seen every kind of market — manias, crashes, slow bleeds, chop, manipulated pumps, coordinated shorts. Think about what you'd actually do with your own money. Would you take this trade right now, seeing this chart?"
+The prompt does not ask the model to optimize entries or invent hidden signals. It asks one important question:
 
-AI má lidský nadhled, který bot nemá. Vidí:
-- Strukturu ceny — kde je v pohybu, jestli je síla nebo slabost
-- Kontext — jestli dává smysl kupovat **právě teď** při tom, co se děje na vyšších TF
-- To, co je "očividné" pro člověka ale neviditelné pro indikátory na 5m
-- Hlavně: jestli je tenhle vstup přesně ten typ obchodu, do kterého NFI pak bude nebezpečně průměrovat dolů
+> If this entry is wrong, does this look like the kind of chart I want NFI averaging down into for hours or days?
 
-Většinou pustí trade — bot už udělal svou práci. Ale když je to zjevné, zasáhne.
+That is the real weak point of NFI. The strategy is already excellent at indicator-based filtering. What it lacks is broader chart judgment.
 
-## Soubory
+The AI is meant to catch:
+- failed bounces inside weak higher-timeframe structure
+- post-pump rollover entries
+- obvious trend exhaustion
+- slow bleed structures where NFI would keep averaging down
+- bad opportunity-cost trades that would consume scarce slots
 
-| Soubor | Co dělá |
-|--------|---------|
-| `NostalgiaForInfinityX7.py` | Upstream NFI. Neupravovat — sync workflow ji přepíše. |
-| `nfi_with_veto.py` | Dědí z X7, overriduje `confirm_trade_entry()`. Vytahuje candle data z 1d/4h/1h a překládá NFI entry tag do mode + DCA profilu. |
-| `llm_reviewer.py` | Formátuje price action, volá GPT-5.4 mini přes cliproxy s `reasoning_effort=medium`, parsuje verdict. Cooldown, fail-open, rotující logy. |
-| `.github/workflows/sync-upstream.yml` | Kontroluje nový upstream release tag a při nové verzi stáhne X7 z releasu. |
+Most trades should still pass. The AI is a veto layer, not a replacement strategy.
 
-## Bezpečnost
+## Files
 
-- **Fail-open**: Cliproxy/GPT nedostupné, timeout, parse error → accept.
-- **Low confidence override**: Veto s confidence < 0.3 → accept.
-- **Cooldown**: Cache je klíčovaná podle `pair + side + entry_tag + entry_mode + dca_profile`, ne jen podle páru. Default 60s.
-- **Price invalidation**: Pokud se cena od posledního review pohne o víc než 2 %, cache se zahodí a AI dostane čerstvý review.
-- **NFI first**: LLM se volá jen pokud NFI signál prošel všemi filtry.
+| File | Purpose |
+|------|---------|
+| `NostalgiaForInfinityX7.py` | Upstream NFI strategy. Do not edit manually; sync workflow replaces it on release updates. |
+| `nfi_with_veto.py` | Wrapper strategy. Overrides `confirm_trade_entry()`, extracts higher-timeframe candles, and maps NFI tags into entry mode + DCA profile. |
+| `llm_reviewer.py` | Formats price action, calls GPT-5.4 mini through cliproxy with `reasoning_effort=medium`, parses the veto decision, caches repeated reviews, and writes rotating logs. |
+| `.github/workflows/sync-upstream.yml` | Watches upstream release tags and updates X7 from the released version. |
+
+## Safety Rules
+
+- **Fail-open**: if cliproxy/GPT is unavailable, times out, or returns invalid output, the trade is accepted.
+- **Low-confidence override**: veto with confidence below `0.3` is converted to `accept`.
+- **Cooldown cache**: keyed by `pair + side + entry_tag + entry_mode + dca_profile`, not just pair. Default is 60 seconds.
+- **Price invalidation**: if price moves more than 2% since the last cached review, the cache is discarded and a fresh review is requested.
+- **NFI first**: the LLM is called only if the original X7 entry passed all native NFI filters.
 
 ## Setup
 
@@ -81,20 +88,40 @@ export LLM_COOLDOWN=60
 
 ## Rollout
 
-Fáze 1 se nepouští v shadow módu. Dává větší smysl pustit ji rovnou ve `dry_run` Freqtrade, protože AI už reálně veto rozhodnutí uplatňuje nad skutečným order flow NFI.
+Phase 1 is not meant for shadow mode. It makes more sense to run it directly in Freqtrade `dry_run`, because AI should already be making real veto decisions on the actual NFI order flow.
 
-Pořadí rolloutu:
+Recommended rollout:
 - `dry_run = true`
-- AI veto zapnuté naplno
-- sledovat hlavně vetované obchody, obsazení slotů a obchody, které by jinak spadly do `grind/rebuy`
-- teprve po ověření v dry run přepnout na live
+- AI veto fully enabled
+- watch vetoed trades, slot occupancy, and trades that would otherwise have gone into `grind` / `rebuy`
+- move to live only after dry-run behavior looks sane
 
-Smysl Fáze 1 není zvýšit počet entry. Smysl je odstranit malý počet vstupů, které se později změní ve velké averaging-down pasti.
+Phase 1 is not about increasing entries. It is about removing the small number of entries that later become large averaging-down traps.
 
 ## Logging
 
-`user_data/logs/llm_reviews/reviews-YYYY-MM-DD.jsonl`:
+Logs are written to:
+
+```text
+user_data/logs/llm_reviews/reviews-YYYY-MM-DD.jsonl
+```
+
+Example record:
 
 ```json
-{"timestamp": "2026-05-29T14:32:01", "pair": "SOL/USDT", "entry_tag": "120", "entry_mode": "long_grind", "dca_profile": "aggressive_dca", "side": "long", "rate": 178.5, "open_slots": "6/10", "source": "live", "verdict": "veto", "confidence": 0.88, "rationale": "4H structure is still making lower highs and the daily trend is weak. This is exactly the kind of bounce that can fail and turn into a costly grind.", "llm_response_raw": "{...}"}
+{
+  "timestamp": "2026-05-29T14:32:01",
+  "pair": "SOL/USDT",
+  "entry_tag": "120",
+  "entry_mode": "long_grind",
+  "dca_profile": "aggressive_dca",
+  "side": "long",
+  "rate": 178.5,
+  "open_slots": "6/10",
+  "source": "live",
+  "verdict": "veto",
+  "confidence": 0.88,
+  "rationale": "4H structure is still making lower highs and the daily trend is weak. This is exactly the kind of bounce that can fail and turn into a costly grind.",
+  "llm_response_raw": "{...}"
+}
 ```
