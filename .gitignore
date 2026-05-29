@@ -1,5 +1,11 @@
 .env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
 user_data/
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.updater_state_*/
+.pytest_cache/
