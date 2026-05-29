@@ -57,6 +57,7 @@ Return ONLY this JSON object:
     def __init__(
         self,
         base_url: str = "http://localhost:8317/v1",
+        api_key: str = "",
         model: str = "gpt-5.4-mini",
         reasoning_effort: str = "medium",
         timeout: float = 8.0,
@@ -64,6 +65,7 @@ Return ONLY this JSON object:
         cooldown_seconds: int = 60,
     ):
         self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.timeout = timeout
@@ -255,10 +257,14 @@ Chart data:
 
 Knowing how NFI behaves after entry, should this {side} be allowed through or vetoed?"""
 
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
         try:
             resp = requests.post(
                 f"{self.base_url}/chat/completions",
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 json={
                     "model": self.model,
                     "reasoning_effort": self.reasoning_effort,

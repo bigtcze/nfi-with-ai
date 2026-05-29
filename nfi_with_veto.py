@@ -30,6 +30,7 @@ class NFIWithVeto(NostalgiaForInfinityX7):
 
         self.reviewer = LLMReviewer(
             base_url=os.environ.get("LLM_BASE_URL", "http://localhost:8317/v1"),
+            api_key=os.environ.get("LLM_API_KEY", ""),
             model=os.environ.get("LLM_MODEL", "gpt-5.4-mini"),
             reasoning_effort=os.environ.get("LLM_REASONING_EFFORT", "medium"),
             timeout=float(os.environ.get("LLM_TIMEOUT", "8")),
