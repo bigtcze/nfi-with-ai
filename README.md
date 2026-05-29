@@ -39,6 +39,42 @@ This project does not try to outsmart NFI on every trade. It acts like a trader 
 
 ## Installation
 
+## Docker Quickstart (recommended)
+
+This repository now includes the same Docker-oriented setup style used by upstream NFI:
+
+- `docker-compose.yml`
+- `configs/`
+- `live-account-example.env`
+- `docker/Dockerfile.custom`
+
+Quick start:
+
+```bash
+git clone https://github.com/bigtcze/nfi-with-ai.git
+cd nfi-with-ai
+mkdir -p user_data
+cp configs/recommended_config.json user_data/config.json
+cp live-account-example.env .env
+docker compose up --build
+```
+
+What to edit first:
+
+1. `user_data/config.json`
+   - keep `dry_run: true` for the first run
+2. `.env`
+   - exchange API keys
+   - bot name
+   - API server credentials
+   - cliproxy address and AI settings
+
+Important:
+
+- The included `docker-compose.yml` already mounts `NostalgiaForInfinityX7.py`, `nfi_with_veto.py`, and `llm_reviewer.py`.
+- `configs/recommended_config.json` is already adjusted to use `NFIWithVeto`.
+- The provided `.env` example defaults to `spot` and `dry_run`.
+
 ### Option A: Freqtrade running directly on the host
 
 1. Clone the repository:
@@ -76,6 +112,8 @@ export LLM_COOLDOWN=60
 ```
 
 ### Option B: Freqtrade running in Docker
+
+If you use the included `docker-compose.yml`, prefer the Docker Quickstart above.
 
 Inside Docker, `localhost` means the container, not the host. If cliproxy runs on the host machine, use the host address instead.
 

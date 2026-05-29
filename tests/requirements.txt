@@ -1,0 +1,12 @@
+# freqtrade==2024.5
+# freqtrade @ git+https://github.com/freqtrade/freqtrade@releases/tag/2024.5
+freqtrade
+pytest
+pytest-mock
+pytest-subtests
+pytest-xdist
+ast_comments
+docxtpl
+pytest-md
+pytest-pretty
+numba
