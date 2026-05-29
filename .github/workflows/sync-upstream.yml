@@ -1,0 +1,56 @@
+name: Sync NFI Upstream Release
+
+on:
+  schedule:
+    # Check for new release every 6 hours. Releases come every ~1-2 weeks.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get latest upstream release tag
+        id: upstream
+        run: |
+          LATEST=$(curl -s "https://api.github.com/repos/iterativv/NostalgiaForInfinity/tags?per_page=1" \
+            | jq -r '.[0].name')
+          echo "tag=$LATEST" >> $GITHUB_OUTPUT
+          echo "Latest upstream tag: $LATEST"
+
+      - name: Check if we already have this version
+        id: check
+        run: |
+          CURRENT=""
+          if [ -f .nfi-version ]; then
+            CURRENT=$(cat .nfi-version)
+          fi
+          echo "Current: $CURRENT"
+          echo "Upstream: ${{ steps.upstream.outputs.tag }}"
+          if [ "$CURRENT" = "${{ steps.upstream.outputs.tag }}" ]; then
+            echo "new=false" >> $GITHUB_OUTPUT
+          else
+            echo "new=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download strategy from release tag
+        if: steps.check.outputs.new == 'true'
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          curl -sL "https://raw.githubusercontent.com/iterativv/NostalgiaForInfinity/${TAG}/NostalgiaForInfinityX7.py" \
+            -o NostalgiaForInfinityX7.py
+          echo "$TAG" > .nfi-version
+
+      - name: Commit update
+        if: steps.check.outputs.new == 'true'
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          git add NostalgiaForInfinityX7.py .nfi-version
+          git commit -m "sync: NFI X7 ${TAG}"
+          git push
