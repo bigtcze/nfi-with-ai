@@ -59,6 +59,13 @@ cp live-account-example.env .env
 docker compose up --build
 ```
 
+This starts both:
+
+- `freqtrade`
+- `nfi-updater`
+
+`nfi-updater` keeps the upstream `NostalgiaForInfinityX7.py`, blacklist, and volume pairlist updated from the original NFI repository and restarts the bot only when one of those files changed.
+
 What to edit first:
 
 1. `user_data/config.json`
@@ -68,12 +75,14 @@ What to edit first:
    - bot name
    - API server credentials
    - cliproxy address and AI settings
+   - optional updater schedule via `NFI_UPDATE_CRON`
 
 Important:
 
 - The included `docker-compose.yml` already mounts `NostalgiaForInfinityX7.py`, `nfi_with_veto.py`, and `llm_reviewer.py`.
 - `configs/recommended_config.json` is already adjusted to use `NFIWithVeto`.
 - The provided `.env` example defaults to `spot` and `dry_run`.
+- Automatic updates affect the upstream strategy baseline (`NostalgiaForInfinityX7.py`), blacklist, and pairlist. Your wrapper files stay local.
 
 ### Option A: Freqtrade running directly on the host
 
@@ -221,6 +230,36 @@ LLM_COOLDOWN=60
 The workflow in `.github/workflows/sync-upstream.yml` watches for a new upstream release tag from `iterativv/NostalgiaForInfinity` and updates `NostalgiaForInfinityX7.py` when a new release appears.
 
 The AI layer stays separate in `nfi_with_veto.py` and `llm_reviewer.py`.
+
+## Automatic Updates (Docker)
+
+The included `nfi-updater` sidecar keeps the following files in sync with upstream NFI:
+
+- `NostalgiaForInfinityX7.py`
+- `configs/blacklist-<exchange>.json`
+- the configured volume pairlist file
+
+It does not overwrite:
+
+- `nfi_with_veto.py`
+- `llm_reviewer.py`
+- your local `.env`
+- your `user_data/config.json`
+
+Relevant `.env` variables:
+
+```bash
+NFI_UPDATE_CRON=0 10 * * *
+COMPOSE_PROJECT_NAME=nfiwithai
+# Optional if your pairlist filename differs
+# NFI_PAIRLIST_FILE=pairlist-volume-binance-usdt.json
+```
+
+To inspect updater logs:
+
+```bash
+docker compose logs -f nfi-updater
+```
 
 ## Important Notes
 
