@@ -35,7 +35,7 @@ This project does not try to outsmart NFI on every trade. It acts like a trader 
 1. Freqtrade
 2. a running cliproxy instance reachable from Freqtrade
 3. a GPT model exposed through cliproxy
-4. first rollout in `dry_run`
+4. recommended first run in `dry_run`
 
 ## Installation
 
@@ -120,7 +120,7 @@ If cliproxy runs in the same Docker network as Freqtrade, use the cliproxy servi
 4. Confirm that the strategy `NFIWithVeto` is loaded.
 5. Watch the logs and the vetoed trades.
 
-## Recommended Rollout
+## Recommended First Run
 
 1. Start with `dry_run`.
 2. Keep AI veto fully enabled.
@@ -186,7 +186,6 @@ The AI layer stays separate in `nfi_with_veto.py` and `llm_reviewer.py`.
 
 ## Important Notes
 
-1. This repository currently implements only Phase 1: entry veto.
-2. If cliproxy is unavailable, the bot continues with plain NFI logic.
-3. If you run Docker, double-check the cliproxy address. `localhost` inside the container is almost never what you want.
-4. Always start with `dry_run` before going live.
+1. If cliproxy is unavailable, the bot continues with plain NFI logic.
+2. If you run Docker, double-check the cliproxy address. `localhost` inside the container is almost never what you want.
+3. Always start with `dry_run` before going live.

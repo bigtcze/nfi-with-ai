@@ -88,7 +88,7 @@ export LLM_COOLDOWN=60
 
 ## Rollout
 
-Phase 1 is not meant for shadow mode. It makes more sense to run it directly in Freqtrade `dry_run`, because AI should already be making real veto decisions on the actual NFI order flow.
+This setup is not meant for shadow mode. It makes more sense to run it directly in Freqtrade `dry_run`, because AI should already be making real veto decisions on the actual NFI order flow.
 
 Recommended rollout:
 - `dry_run = true`
@@ -96,7 +96,7 @@ Recommended rollout:
 - watch vetoed trades, slot occupancy, and trades that would otherwise have gone into `grind` / `rebuy`
 - move to live only after dry-run behavior looks sane
 
-Phase 1 is not about increasing entries. It is about removing the small number of entries that later become large averaging-down traps.
+This setup is not about increasing entries. It is about removing the small number of entries that later become large averaging-down traps.
 
 ## Logging
 
