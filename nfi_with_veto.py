@@ -12,6 +12,8 @@ from datetime import datetime
 from typing import Optional
 
 import numpy as np
+import talib.abstract as ta
+from pandas import DataFrame
 from freqtrade.persistence import Trade
 
 from NostalgiaForInfinityX7 import NostalgiaForInfinityX7
@@ -71,6 +73,11 @@ class NFIWithVeto(NostalgiaForInfinityX7):
         if not nfi_ok:
             return False
 
+        # Manual force entries are an explicit user action. NFI passes them
+        # through unconditionally, so the AI veto must not block them either.
+        if entry_tag == "force_entry":
+            return True
+
         candles_1d = self._extract_candles(pair, "1d", count=14)
         candles_4h = self._extract_candles(pair, "4h", count=20)
         candles_1h = self._extract_candles(pair, "1h", count=24)
@@ -124,11 +131,23 @@ class NFIWithVeto(NostalgiaForInfinityX7):
         return True
 
     def _extract_candles(self, pair: str, timeframe: str, count: int) -> list[dict]:
-        """Extract recent OHLCV plus key indicators from one timeframe."""
+        """Extract recent OHLCV plus key indicators from one timeframe.
+
+        NFI merges its higher-timeframe data into the 5m dataframe via
+        ``merge_informative_pair`` and never stores a separate analyzed
+        dataframe for 1d/4h/1h. It also drops the higher-timeframe OHLCV
+        during that merge, so ``get_analyzed_dataframe(pair, "1d")`` would
+        return an empty frame here. We therefore pull raw OHLCV through
+        ``get_pair_dataframe`` (live in dry/live, cached on disk in backtest)
+        and recompute the same indicators NFI uses, so the reviewer sees real
+        candles instead of "no data available".
+        """
         try:
-            df, _ = self.dp.get_analyzed_dataframe(pair, timeframe)
+            df = self.dp.get_pair_dataframe(pair=pair, timeframe=timeframe)
             if df is None or df.empty:
                 return []
+
+            df = self._add_review_indicators(df)
 
             candles = []
             for _, row in df.tail(count).iterrows():
@@ -141,21 +160,10 @@ class NFIWithVeto(NostalgiaForInfinityX7):
                     "volume": float(row.get("volume", 0)),
                 }
 
-                indicator_map = {
-                    "rsi_14": ["RSI_14", "rsi_14"],
-                    "rsi_3": ["RSI_3", "rsi_3"],
-                    "mfi_14": ["MFI_14", "mfi_14"],
-                    "change_pct": ["change_pct"],
-                }
-                for out_name, candidates in indicator_map.items():
-                    for column_name in candidates:
-                        if (
-                            column_name in row.index
-                            and row[column_name] is not None
-                            and not (isinstance(row[column_name], float) and np.isnan(row[column_name]))
-                        ):
-                            candle[out_name] = float(row[column_name])
-                            break
+                for out_name in ("rsi_14", "rsi_3", "mfi_14", "change_pct"):
+                    value = row.get(out_name)
+                    if value is not None and not (isinstance(value, float) and np.isnan(value)):
+                        candle[out_name] = float(value)
 
                 candles.append(candle)
 
@@ -163,6 +171,27 @@ class NFIWithVeto(NostalgiaForInfinityX7):
         except Exception as exc:
             logger.debug("Failed to extract %s candles for %s: %s", timeframe, pair, exc)
             return []
+
+    @staticmethod
+    def _add_review_indicators(df: DataFrame) -> DataFrame:
+        """Recompute the indicators the reviewer expects, matching NFI formulas.
+
+        NFI computes these from raw OHLCV with talib (see informative_*_indicators):
+        RSI_3, RSI_14, MFI_14 and the per-candle change_pct.
+        """
+        close_np = df["close"].to_numpy(copy=False)
+        high_np = df["high"].to_numpy(copy=False)
+        low_np = df["low"].to_numpy(copy=False)
+        open_np = df["open"].to_numpy(copy=False)
+        volume_np = df["volume"].to_numpy(copy=False)
+
+        df = df.copy()
+        df["rsi_3"] = ta.RSI(close_np, timeperiod=3)
+        df["rsi_14"] = ta.RSI(close_np, timeperiod=14)
+        df["mfi_14"] = ta.MFI(high_np, low_np, close_np, volume_np, timeperiod=14)
+        open_safe = np.where(open_np == 0, np.nan, open_np)
+        df["change_pct"] = ((close_np - open_np) / open_safe) * 100.0
+        return df
 
     def _tags_all(self, tags: list[str], allowed: list[str]) -> bool:
         return bool(tags) and all(tag in allowed for tag in tags)
@@ -172,6 +201,41 @@ class NFIWithVeto(NostalgiaForInfinityX7):
 
     def _tags_any(self, tags: list[str], allowed: list[str]) -> bool:
         return any(tag in allowed for tag in tags)
+
+    def _uses_v3_system(self) -> bool:
+        """All current NFI systems (v3 / v3_1 / v3_2) route non-grind modes into
+        the grinding adjust path, so they average down too. Older non-v3 behavior
+        only existed for trades opened before 2025-02-13."""
+        try:
+            return self.system_name_use in (
+                self.system_v3_name,
+                self.system_v3_1_name,
+                self.system_v3_2_name,
+            )
+        except Exception:
+            return True
+
+    def _resolve_dca_profile(self, tags: list[str], aggressive_tags: list[str], light_tags: list[str]) -> str:
+        """Map NFI entry tags to a DCA aggressiveness label for the reviewer.
+
+        Reality check against NostalgiaForInfinityX7.adjust_trade_position:
+        under the v3 systems, every non-grind/non-btc mode (normal, pump, quick,
+        rapid, scalp, top_coins, high_profit) is routed into the grind adjust
+        path and DOES average down. Only grind/btc/rebuy use the dedicated heavy
+        ladders. So "minimal_dca" is only honest for the lighter rapid/scalp
+        modes, and even those still grind under v3 - hence moderate, not minimal.
+        """
+        if self._tags_any(tags, aggressive_tags):
+            return "aggressive_dca"
+        if self._uses_v3_system():
+            # Under v3 even rapid/scalp grind, just with lighter stake ladders.
+            if self._tags_any(tags, light_tags):
+                return "minimal_dca"
+            return "moderate_dca"
+        # Legacy (pre-v3) behavior: rapid/scalp barely averaged.
+        if self._tags_any(tags, light_tags):
+            return "minimal_dca"
+        return "moderate_dca"
 
     def _resolve_entry_context(self, entry_tag: str, side: str) -> tuple[str, str]:
         tags = entry_tag.split()
@@ -200,6 +264,8 @@ class NFIWithVeto(NostalgiaForInfinityX7):
             mode = "long_btc"
         elif self._tags_any(tags, self.long_top_coins_mode_tags):
             mode = "long_top_coins"
+        elif self._tags_any(tags, self.long_high_profit_mode_tags):
+            mode = "long_high_profit"
         elif self._tags_any(tags, self.long_pump_mode_tags):
             mode = "long_pump"
         elif self._tags_any(tags, self.long_quick_mode_tags):
@@ -209,12 +275,11 @@ class NFIWithVeto(NostalgiaForInfinityX7):
         else:
             mode = f"long_unknown ({entry_tag})"
 
-        if self._tags_any(tags, self.long_grind_mode_tags + self.long_rebuy_mode_tags):
-            dca_profile = "aggressive_dca"
-        elif self._tags_any(tags, self.long_rapid_mode_tags + self.long_scalp_mode_tags):
-            dca_profile = "minimal_dca"
-        else:
-            dca_profile = "moderate_dca"
+        # btc mode (121) shares the grind stake ladder and grind adjust path,
+        # so it averages down just as hard as grind/rebuy.
+        aggressive_tags = self.long_grind_mode_tags + self.long_btc_mode_tags + self.long_rebuy_mode_tags
+        light_tags = self.long_rapid_mode_tags + self.long_scalp_mode_tags
+        dca_profile = self._resolve_dca_profile(tags, aggressive_tags, light_tags)
 
         return mode, dca_profile
 
@@ -237,6 +302,8 @@ class NFIWithVeto(NostalgiaForInfinityX7):
             mode = "short_scalp"
         elif self._tags_any(tags, self.short_top_coins_mode_tags):
             mode = "short_top_coins"
+        elif self._tags_any(tags, self.short_high_profit_mode_tags):
+            mode = "short_high_profit"
         elif self._tags_any(tags, self.short_pump_mode_tags):
             mode = "short_pump"
         elif self._tags_any(tags, self.short_quick_mode_tags):
@@ -246,18 +313,27 @@ class NFIWithVeto(NostalgiaForInfinityX7):
         else:
             mode = f"short_unknown ({entry_tag})"
 
-        if self._tags_any(tags, self.short_grind_mode_tags + self.short_rebuy_mode_tags):
-            dca_profile = "aggressive_dca"
-        elif self._tags_any(tags, self.short_rapid_mode_tags + self.short_scalp_mode_tags):
-            dca_profile = "minimal_dca"
-        else:
-            dca_profile = "moderate_dca"
+        aggressive_tags = self.short_grind_mode_tags + self.short_rebuy_mode_tags
+        light_tags = self.short_rapid_mode_tags + self.short_scalp_mode_tags
+        dca_profile = self._resolve_dca_profile(tags, aggressive_tags, light_tags)
 
         return mode, dca_profile
 
+    def _btc_info_pair(self) -> str:
+        """Resolve the BTC reference pair the same way NFI does (spot vs futures)."""
+        stake = self.config.get("stake_currency", "USDT")
+        fiat_like = ["USDT", "BUSD", "USDC", "DAI", "TUSD", "FDUSD", "PAX", "USD", "EUR", "GBP", "TRY"]
+        if stake in fiat_like:
+            if self.config.get("trading_mode") in ["futures", "margin"]:
+                return f"BTC/{stake}:{stake}"
+            return f"BTC/{stake}"
+        if self.config.get("trading_mode") in ["futures", "margin"]:
+            return "BTC/USDT:USDT"
+        return "BTC/USDT"
+
     def _get_btc_context(self) -> tuple[Optional[float], Optional[str]]:
         try:
-            df, _ = self.dp.get_analyzed_dataframe("BTC/USDT", "1d")
+            df = self.dp.get_pair_dataframe(pair=self._btc_info_pair(), timeframe="1d")
             if df is None or len(df) < 2:
                 return None, None
 
