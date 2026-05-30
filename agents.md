@@ -18,10 +18,12 @@ confirm_trade_entry()
   |  |- NFI rejected -> STOP (no LLM call)
   |  \- NFI accepted
   |
-  |- 1D candles (14) + RSI/MFI
-  |- 4H candles (20) + RSI/MFI
-  |- 1H candles (24) + RSI/MFI
-  |- BTC 24h change + 7d trend
+  |- 1W candles (12) + RSI/MFI/ATR%
+  |- 1D candles (30) + RSI/MFI/ATR%
+  |- 4H candles (20) + RSI/MFI/ATR%
+  |- 1H candles (24) + RSI/MFI/ATR%
+  |- BTC 24h change + 7d trend + 1D BTC candle sequence
+  |- open-position state (filled DCA legs, open PnL, age)
   |- recent closed trades on the pair
   |- entry mode + DCA profile
   |- open slot usage
@@ -75,7 +77,8 @@ Most trades should still pass. The AI is a veto layer, not a replacement strateg
 export LLM_BASE_URL=http://localhost:8317/v1
 export LLM_MODEL=gpt-5.4-mini
 export LLM_REASONING_EFFORT=medium
-export LLM_TIMEOUT=8
+export LLM_TIMEOUT=20
+export LLM_MAX_TOKENS=16384
 export LLM_COOLDOWN=60
 ```
 

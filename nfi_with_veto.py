@@ -35,16 +35,20 @@ class NFIWithVeto(NostalgiaForInfinityX7):
             api_key=os.environ.get("LLM_API_KEY", ""),
             model=os.environ.get("LLM_MODEL", "gpt-5.4-mini"),
             reasoning_effort=os.environ.get("LLM_REASONING_EFFORT", "medium"),
-            timeout=float(os.environ.get("LLM_TIMEOUT", "8")),
+            timeout=float(os.environ.get("LLM_TIMEOUT", "20")),
             cooldown_seconds=int(os.environ.get("LLM_COOLDOWN", "60")),
+            max_completion_tokens=int(os.environ.get("LLM_MAX_TOKENS", "16384")),
         )
 
         logger.info(
-            "NFIWithVeto initialized - model=%s effort=%s base_url=%s cooldown=%ss fail_mode=open",
+            "NFIWithVeto initialized - model=%s effort=%s base_url=%s timeout=%ss "
+            "cooldown=%ss max_tokens=%s fail_mode=open",
             self.reviewer.model,
             self.reviewer.reasoning_effort,
             self.reviewer.base_url,
+            self.reviewer.timeout,
             self.reviewer.cooldown_seconds,
+            self.reviewer.max_completion_tokens,
         )
 
     def confirm_trade_entry(
@@ -78,7 +82,8 @@ class NFIWithVeto(NostalgiaForInfinityX7):
         if entry_tag == "force_entry":
             return True
 
-        candles_1d = self._extract_candles(pair, "1d", count=14)
+        candles_1w = self._extract_candles(pair, "1w", count=12)
+        candles_1d = self._extract_candles(pair, "1d", count=30)
         candles_4h = self._extract_candles(pair, "4h", count=20)
         candles_1h = self._extract_candles(pair, "1h", count=24)
 
@@ -88,7 +93,8 @@ class NFIWithVeto(NostalgiaForInfinityX7):
         except Exception:
             recent_trades = []
 
-        btc_change, btc_trend = self._get_btc_context()
+        position_state = self._get_position_state(pair, current_time, rate)
+        btc_change, btc_trend, btc_candles = self._get_btc_context()
         entry_mode, dca_profile = self._resolve_entry_context(entry_tag or "unknown", side)
 
         try:
@@ -106,11 +112,14 @@ class NFIWithVeto(NostalgiaForInfinityX7):
             rate=rate,
             side=side,
             recent_trades=recent_trades,
+            candles_1w=candles_1w,
             candles_1d=candles_1d,
             candles_4h=candles_4h,
             candles_1h=candles_1h,
             btc_change_pct=btc_change,
             btc_trend=btc_trend,
+            btc_candles=btc_candles,
+            position_state=position_state,
             open_slots=slot_info,
         )
 
@@ -160,7 +169,7 @@ class NFIWithVeto(NostalgiaForInfinityX7):
                     "volume": float(row.get("volume", 0)),
                 }
 
-                for out_name in ("rsi_14", "rsi_3", "mfi_14", "change_pct"):
+                for out_name in ("rsi_14", "rsi_3", "mfi_14", "change_pct", "atr_pct"):
                     value = row.get(out_name)
                     if value is not None and not (isinstance(value, float) and np.isnan(value)):
                         candle[out_name] = float(value)
@@ -191,6 +200,11 @@ class NFIWithVeto(NostalgiaForInfinityX7):
         df["mfi_14"] = ta.MFI(high_np, low_np, close_np, volume_np, timeperiod=14)
         open_safe = np.where(open_np == 0, np.nan, open_np)
         df["change_pct"] = ((close_np - open_np) / open_safe) * 100.0
+        # ATR as a percentage of price, so the reviewer can tell whether a move
+        # is normal volatility or a structural break rather than reading raw ATR.
+        atr = ta.ATR(high_np, low_np, close_np, timeperiod=14)
+        close_safe = np.where(close_np == 0, np.nan, close_np)
+        df["atr_pct"] = (atr / close_safe) * 100.0
         return df
 
     def _tags_all(self, tags: list[str], allowed: list[str]) -> bool:
@@ -331,16 +345,38 @@ class NFIWithVeto(NostalgiaForInfinityX7):
             return "BTC/USDT:USDT"
         return "BTC/USDT"
 
-    def _get_btc_context(self) -> tuple[Optional[float], Optional[str]]:
+    def _get_btc_context(
+        self,
+    ) -> tuple[Optional[float], Optional[str], list[dict]]:
+        """Return BTC 24h change, a coarse 7d trend label, and a short 1D
+        candle sequence so the reviewer can read BTC structure instead of a
+        single number (alts usually follow BTC)."""
         try:
             df = self.dp.get_pair_dataframe(pair=self._btc_info_pair(), timeframe="1d")
             if df is None or len(df) < 2:
-                return None, None
+                return None, None, []
 
             yesterday = float(df.iloc[-2]["close"])
             today = float(df.iloc[-1]["close"])
             day_change = ((today - yesterday) / yesterday) * 100
 
+            btc_candles: list[dict] = []
+            for _, row in df.tail(7).iterrows():
+                open_price = float(row.get("open", 0))
+                close = float(row.get("close", 0))
+                btc_candles.append(
+                    {
+                        "date": str(row.get("date", ""))[:16],
+                        "open": open_price,
+                        "high": float(row.get("high", 0)),
+                        "low": float(row.get("low", 0)),
+                        "close": close,
+                        "volume": float(row.get("volume", 0)),
+                        "change_pct": ((close - open_price) / open_price * 100.0) if open_price else 0.0,
+                    }
+                )
+
+            trend = None
             if len(df) >= 7:
                 week_ago = float(df.iloc[-7]["close"])
                 week_change = ((today - week_ago) / week_ago) * 100
@@ -350,8 +386,52 @@ class NFIWithVeto(NostalgiaForInfinityX7):
                     trend = "bearish"
                 else:
                     trend = "sideways"
-                return day_change, trend
 
-            return day_change, None
+            return day_change, trend, btc_candles
         except Exception:
-            return None, None
+            return None, None, []
+
+    def _get_position_state(
+        self, pair: str, current_time: datetime, current_rate: float
+    ) -> Optional[dict]:
+        """Describe any already-open position on this pair.
+
+        This is the reviewer's biggest blind spot: the whole point of the veto
+        is to avoid letting NFI average down into a bad chart, but without
+        knowing how many DCA legs already filled and the current PnL, the model
+        cannot tell a fresh entry from a deep grind. NFI counts DCA legs via
+        ``trade.select_filled_orders(trade.entry_side)`` (see X7), so we mirror
+        that here.
+        """
+        try:
+            open_trades = Trade.get_trades_proxy(pair=pair, is_open=True)
+        except Exception:
+            return None
+
+        if not open_trades:
+            return {"has_open_position": False}
+
+        trade = open_trades[0]
+        try:
+            filled_entries = trade.select_filled_orders(trade.entry_side)
+            nr_filled_entries = len(filled_entries)
+        except Exception:
+            nr_filled_entries = None
+
+        try:
+            current_profit = trade.calc_profit_ratio(current_rate)
+        except Exception:
+            current_profit = None
+
+        try:
+            open_dt = trade.open_date_utc.replace(tzinfo=None)
+            age_hours = (current_time.replace(tzinfo=None) - open_dt).total_seconds() / 3600.0
+        except Exception:
+            age_hours = None
+
+        return {
+            "has_open_position": True,
+            "nr_filled_entries": nr_filled_entries,
+            "open_profit_ratio": current_profit,
+            "age_hours": age_hours,
+        }

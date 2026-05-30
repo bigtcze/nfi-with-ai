@@ -27,11 +27,12 @@ The critical risk is this: when the bot enters a bad trade, it does not cut it q
 Your job is not to optimize entries. Your job is to stop the obvious bad ones that are likely to become averaging-down traps.
 
 You will receive:
-- 1D, 4H, and 1H chart data
+- 1W, 1D, 4H, and 1H chart data (with RSI, MFI and ATR% per candle)
 - the proposed entry price and side
 - the NFI entry mode
 - the DCA profile, which tells you how aggressively the bot will average down if the trade goes wrong
-- BTC context
+- the current position state on this pair (whether a position is already open, how many DCA legs already filled, current open PnL, and how long it has been open)
+- BTC context, including a short daily BTC candle sequence
 - recent trade history on the same pair
 - current slot usage
 
@@ -39,6 +40,10 @@ DCA profile meanings:
 - aggressive_dca: the bot is likely to add hard into losers. Be strict.
 - moderate_dca: standard NFI averaging behavior. Normal scrutiny.
 - minimal_dca: lighter averaging behavior. Still veto obvious garbage.
+
+Position state matters. If no position is open yet, judge this as a fresh entry. If a position is ALREADY open with one or more filled legs and is underwater, you are really being asked "should the bot add ANOTHER leg into this?" - be stricter there, because that is exactly the averaging-down trap you exist to stop.
+
+ATR% tells you how large normal candle volatility is. Use it to tell whether a drop is just noise or a genuine structural breakdown.
 
 What you are asking yourself is not "can this bounce 2%?".
 The real question is: "if this entry is wrong, does this chart look like something I would want the bot averaging down into for hours or days?"
@@ -60,15 +65,17 @@ Return ONLY this JSON object:
         api_key: str = "",
         model: str = "gpt-5.4-mini",
         reasoning_effort: str = "medium",
-        timeout: float = 8.0,
+        timeout: float = 20.0,
         log_dir: str = "user_data/logs/llm_reviews",
         cooldown_seconds: int = 60,
+        max_completion_tokens: int = 16384,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.timeout = timeout
+        self.max_completion_tokens = max_completion_tokens
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.cooldown_seconds = cooldown_seconds
@@ -85,8 +92,11 @@ Return ONLY this JSON object:
         entry_tag: str,
         entry_mode: str,
         dca_profile: str,
+        legs: Optional[int] = None,
     ) -> str:
-        return "|".join((pair, side, entry_tag, entry_mode, dca_profile))
+        # Include the number of already-filled DCA legs so a fresh entry and a
+        # request to add another leg into an open position never share a verdict.
+        return "|".join((pair, side, entry_tag, entry_mode, dca_profile, str(legs)))
 
     def _check_cooldown(self, cache_key: str, current_rate: float) -> Optional[dict]:
         """Return cached verdict if it is still fresh enough."""
@@ -144,6 +154,8 @@ Return ONLY this JSON object:
                 extras.append(f"RSI3={candle['rsi_3']:.1f}")
             if candle.get("mfi_14") is not None:
                 extras.append(f"MFI={candle['mfi_14']:.1f}")
+            if candle.get("atr_pct") is not None:
+                extras.append(f"ATR%={candle['atr_pct']:.1f}")
 
             extra_str = f" [{', '.join(extras)}]" if extras else ""
             candle_change_pct = ((close - open_price) / open_price * 100) if open_price else 0
@@ -175,6 +187,26 @@ Return ONLY this JSON object:
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _format_position_state(position_state: Optional[dict]) -> str:
+        """Render the open-position context into a single readable line."""
+        if not position_state:
+            return "Position state: unknown"
+        if not position_state.get("has_open_position"):
+            return "Position state: no open position (this would be a fresh first entry)"
+
+        parts = ["ALREADY OPEN"]
+        legs = position_state.get("nr_filled_entries")
+        if legs is not None:
+            parts.append(f"{legs} filled leg(s)")
+        profit = position_state.get("open_profit_ratio")
+        if profit is not None:
+            parts.append(f"open PnL {profit * 100:+.2f}%")
+        age = position_state.get("age_hours")
+        if age is not None:
+            parts.append(f"open for {age:.1f}h")
+        return "Position state: " + ", ".join(parts)
+
     def review(
         self,
         pair: str,
@@ -187,8 +219,11 @@ Return ONLY this JSON object:
         candles_1d: list[dict],
         candles_4h: list[dict],
         candles_1h: list[dict],
+        candles_1w: Optional[list[dict]] = None,
         btc_change_pct: Optional[float] = None,
         btc_trend: Optional[str] = None,
+        btc_candles: Optional[list[dict]] = None,
+        position_state: Optional[dict] = None,
         open_slots: Optional[str] = None,
     ) -> dict:
         default_accept = {
@@ -197,7 +232,8 @@ Return ONLY this JSON object:
             "rationale": "reviewer_unavailable",
         }
 
-        cache_key = self._make_cache_key(pair, side, entry_tag, entry_mode, dca_profile)
+        legs = position_state.get("nr_filled_entries") if position_state else None
+        cache_key = self._make_cache_key(pair, side, entry_tag, entry_mode, dca_profile, legs)
         cached = self._check_cooldown(cache_key, rate)
         if cached is not None:
             self._log_review(
@@ -223,7 +259,8 @@ Return ONLY this JSON object:
             except Exception:
                 pass
 
-        pa_1d = self._format_candles(candles_1d, "1D", count=14)
+        pa_1w = self._format_candles(candles_1w or [], "1W", count=12)
+        pa_1d = self._format_candles(candles_1d, "1D", count=30)
         pa_4h = self._format_candles(candles_4h, "4H", count=20)
         pa_1h = self._format_candles(candles_1h, "1H", count=24)
 
@@ -232,6 +269,11 @@ Return ONLY this JSON object:
             btc_line = f"BTC 24h: {btc_change_pct:+.2f}%"
         if btc_trend:
             btc_line += f" | 7d trend: {btc_trend}"
+        if btc_candles:
+            btc_pa = self._format_candles(btc_candles, "BTC 1D", count=7)
+            btc_line += f"\n{btc_pa}"
+
+        position_line = self._format_position_state(position_state)
 
         slots_line = f"Open slots: {open_slots}" if open_slots else ""
 
@@ -242,6 +284,7 @@ Return ONLY this JSON object:
 - Entry mode: {entry_mode}
 - DCA profile: {dca_profile}
 - Entry price: {rate}
+{position_line}
 {btc_line}
 {slots_line}
 
@@ -249,6 +292,8 @@ Recent trades on {pair}:
 {chr(10).join(trade_summary) if trade_summary else "  None"}
 
 Chart data:
+{pa_1w}
+
 {pa_1d}
 
 {pa_4h}
@@ -273,12 +318,19 @@ Knowing how NFI behaves after entry, should this {side} be allowed through or ve
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.1,
-                    "max_completion_tokens": 4096,
+                    "max_completion_tokens": self.max_completion_tokens,
                 },
                 timeout=self.timeout,
             )
 
             if resp.status_code != 200:
+                logger.warning(
+                    "LLM review fail-open (HTTP %s) for %s %s tag=%s - trade accepted without AI review",
+                    resp.status_code,
+                    pair,
+                    side,
+                    entry_tag,
+                )
                 self._log_review(
                     pair=pair,
                     entry_tag=entry_tag,
@@ -301,6 +353,32 @@ Knowing how NFI behaves after entry, should this {side} be allowed through or ve
                 end = content.rfind("}") + 1
                 if start >= 0 and end > start:
                     json_str = content[start:end]
+
+            # A response with an opening brace but no closing brace usually means
+            # the model ran out of completion tokens (reasoning consumed the
+            # budget) and the JSON was truncated. Surface it loudly as fail-open.
+            if "{" in content and "}" not in content:
+                logger.warning(
+                    "LLM review fail-open (truncated/no-JSON response, likely token budget) "
+                    "for %s %s tag=%s - trade accepted without AI review. Raw head: %s",
+                    pair,
+                    side,
+                    entry_tag,
+                    content[:200],
+                )
+                self._log_review(
+                    pair=pair,
+                    entry_tag=entry_tag,
+                    entry_mode=entry_mode,
+                    dca_profile=dca_profile,
+                    side=side,
+                    rate=rate,
+                    open_slots=open_slots,
+                    response=content,
+                    verdict=default_accept,
+                    source="fail_open_truncated",
+                )
+                return default_accept
 
             verdict = json.loads(json_str)
             raw_verdict = str(verdict.get("verdict", "")).strip().lower()
@@ -340,6 +418,13 @@ Knowing how NFI behaves after entry, should this {side} be allowed through or ve
             return parsed_verdict
 
         except json.JSONDecodeError as exc:
+            logger.warning(
+                "LLM review fail-open (JSON parse error: %s) for %s %s tag=%s - trade accepted without AI review",
+                exc,
+                pair,
+                side,
+                entry_tag,
+            )
             self._log_review(
                 pair=pair,
                 entry_tag=entry_tag,
@@ -354,6 +439,14 @@ Knowing how NFI behaves after entry, should this {side} be allowed through or ve
             )
             return default_accept
         except requests.exceptions.Timeout:
+            logger.warning(
+                "LLM review fail-open (timeout after %ss) for %s %s tag=%s - trade accepted without AI review. "
+                "Consider raising LLM_TIMEOUT or lowering LLM_REASONING_EFFORT.",
+                self.timeout,
+                pair,
+                side,
+                entry_tag,
+            )
             self._log_review(
                 pair=pair,
                 entry_tag=entry_tag,
@@ -368,6 +461,13 @@ Knowing how NFI behaves after entry, should this {side} be allowed through or ve
             )
             return default_accept
         except Exception as exc:
+            logger.warning(
+                "LLM review fail-open (error: %s) for %s %s tag=%s - trade accepted without AI review",
+                exc,
+                pair,
+                side,
+                entry_tag,
+            )
             self._log_review(
                 pair=pair,
                 entry_tag=entry_tag,

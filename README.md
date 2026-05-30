@@ -10,7 +10,7 @@ This project does not try to outsmart NFI on every trade. It acts like a trader 
 
 - preserves the full original `NostalgiaForInfinityX7` logic
 - calls AI only after `super().confirm_trade_entry()` passes
-- sends `1D`, `4H`, and `1H` candle context, BTC context, entry mode, and DCA profile to the reviewer
+- sends `1W`, `1D`, `4H`, and `1H` candle context (with RSI/MFI/ATR%), structured BTC context, open-position state (filled DCA legs, PnL, age), entry mode, and DCA profile to the reviewer
 - allows the reviewer to return only `accept` or `veto`
 - uses `fail-open`, so if AI is unavailable the trade proceeds through plain NFI
 
@@ -106,7 +106,8 @@ cp nfi-with-ai/llm_reviewer.py /path/to/freqtrade/user_data/strategies/
 export LLM_BASE_URL=http://localhost:8317/v1
 export LLM_MODEL=gpt-5.4-mini
 export LLM_REASONING_EFFORT=medium
-export LLM_TIMEOUT=8
+export LLM_TIMEOUT=20
+export LLM_MAX_TOKENS=16384
 export LLM_COOLDOWN=60
 ```
 
@@ -141,7 +142,8 @@ services:
       - LLM_BASE_URL=http://host.docker.internal:8317/v1
       - LLM_MODEL=gpt-5.4-mini
       - LLM_REASONING_EFFORT=medium
-      - LLM_TIMEOUT=8
+      - LLM_TIMEOUT=20
+      - LLM_MAX_TOKENS=16384
       - LLM_COOLDOWN=60
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -211,8 +213,9 @@ Environment variables used by the reviewer:
 
 - `LLM_BASE_URL`: cliproxy endpoint
 - `LLM_MODEL`: model exposed by cliproxy
-- `LLM_REASONING_EFFORT`: `low`, `medium`, `high` depending on cliproxy/model support
+- `LLM_REASONING_EFFORT`: `low`, `medium`, `high` depending on cliproxy/model support. Default `medium`; `high` reasons long on every review and increases timeout risk.
 - `LLM_TIMEOUT`: request timeout in seconds
+- `LLM_MAX_TOKENS`: max completion tokens; high enough that reasoning plus JSON both fit (otherwise truncated JSON fails open)
 - `LLM_COOLDOWN`: cache duration for repeated reviews in seconds
 
 Repository defaults:
@@ -221,7 +224,8 @@ Repository defaults:
 LLM_BASE_URL=http://localhost:8317/v1
 LLM_MODEL=gpt-5.4-mini
 LLM_REASONING_EFFORT=medium
-LLM_TIMEOUT=8
+LLM_TIMEOUT=20
+LLM_MAX_TOKENS=16384
 LLM_COOLDOWN=60
 ```
 
